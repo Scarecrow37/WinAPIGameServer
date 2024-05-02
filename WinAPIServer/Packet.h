@@ -7,6 +7,8 @@ enum Type
     Connect = 10,
     OtherConnect = 11,
     Disconnect = 20,
+    PlayerLocation = 30,
+    OtherLocation = 31,
     MAX
 };
 

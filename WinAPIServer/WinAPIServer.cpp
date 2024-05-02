@@ -12,6 +12,7 @@ constexpr int MaximumPlayerCount = 2;
 const wchar_t* CharacterNames[2] = {L"Woodcutter", L"GraveRobber"};
 bool PlayersExist[2] = {false, false};
 Location PlayersLocation[2] = {};
+SOCKET clientSockets[2] = {INVALID_SOCKET, INVALID_SOCKET};
 
 unsigned WINAPI WorkerThread(void* argument);
 
@@ -68,10 +69,12 @@ int main()
                     connection.canConnect = true;
                     wcscpy_s(connection.characterName, CharacterNames[i]);
                     PlayersExist[i] = true;
+                    clientSockets[i] = clientSocket;
                 }
             }
             result = send(clientSocket, reinterpret_cast<char*>(&connection), sizeof(connection), 0);
             if (result < 0) throw std::exception("Connection data send fail.");
+
 
             // Other player connect sequence
             if (connection.canConnect)
@@ -83,7 +86,6 @@ int main()
                 wcscpy_s(otherConnection.characterName, connection.characterName);
                 for (unsigned i = 0; i < clientSocketList.fd_count; ++i)
                 {
-                    char buffer[1024] = {};
                     result = send(clientSocketList.fd_array[i], reinterpret_cast<char*>(&otherHeader),
                                   sizeof(otherHeader), 0);
                     if (result < 0) throw std::exception("Other connection header send fail.");
@@ -113,9 +115,9 @@ unsigned WorkerThread(void* argument)
 {
     fd_set* list = static_cast<fd_set*>(argument);
     fd_set copyList = {};
-    TIMEVAL timeout;
+    TIMEVAL timeout = {};
     timeout.tv_sec = 0;
-    timeout.tv_usec = 100;
+    timeout.tv_usec = 10;
     while (true)
     {
         copyList = *list;
@@ -124,16 +126,56 @@ unsigned WorkerThread(void* argument)
         for (unsigned i = 0; i < list->fd_count; ++i)
         {
             if (!FD_ISSET(list->fd_array[i], &copyList)) continue;
-            char buffer[1024] = {};
-            const int receiveByte = recv(list->fd_array[i], buffer, sizeof(buffer), 0);
+            Header header = {};
+            int receiveByte = recv(list->fd_array[i], reinterpret_cast<char*>(&header), sizeof(header), MSG_WAITALL);
             if (receiveByte <= 0)
             {
-                // Abnormal sequence
-                closesocket(list->fd_array[i]);
-                FD_CLR(list->fd_array[i], &list);
+                // Abnormal sequence (Disconnect)
+                const SOCKET deleteSocket = list->fd_array[i];
+                for (int j = 0; j < MaximumPlayerCount; ++j)
+                {
+                    if (clientSockets[j] == deleteSocket)
+                    {
+                        PlayersExist[j] = false;
+                        PlayersLocation[j] = {};
+                        clientSockets[j] = INVALID_SOCKET;
+                    }
+                    else
+                    {
+                        Header header = {};
+                        header.type = Disconnect;
+                        send(clientSockets[j], reinterpret_cast<char*>(&header), sizeof(header), 0);
+                    }
+                }
+                FD_CLR(deleteSocket, list);
+                closesocket(deleteSocket);
                 continue;
             }
             // Normal Sequence
+            switch (header.type)
+            {
+            case PlayerLocation:
+                {
+                    Location location = {};
+                    receiveByte = recv(list->fd_array[i], reinterpret_cast<char*>(&location), header.length,
+                                       MSG_WAITALL);
+                    if (receiveByte <= 0) throw std::exception("Receive player location fail.");
+                    header = {};
+                    header.type = OtherLocation;
+                    header.length = sizeof(Location);
+                    for (const SOCKET clientSocket : clientSockets)
+                    {
+                        if (clientSocket == INVALID_SOCKET || clientSocket == list->fd_array[i]) continue;
+                        int result = send(clientSocket, reinterpret_cast<char*>(&header), sizeof(header), 0);
+                        if (result < 0) throw std::exception("Send other location header fail.");
+                        result = send(clientSocket, reinterpret_cast<char*>(&location), sizeof(location), 0);
+                        if (result < 0) throw std::exception("Send other location data fail.");
+                    }
+                }
+                break;
+            default:
+                throw std::exception("Receive unknown packet.");
+            }
         }
     }
 }
